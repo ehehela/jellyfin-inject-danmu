@@ -14,7 +14,8 @@
      * 7. UI 与引擎分离：控制按钮和设置面板的创建与弹幕引擎初始化完全解耦。
      *    即使弹幕引擎创建失败（如 JMP 环境），UI 相关状态仍需正确标记，防止 Observer 不断重复尝试初始化。
      * 8. 视频生命周期锁定：通过 currentItemIdCache 缓存当前视频 ID，在 DOM 变化时通过对比 ID 判断是否真的是视频切换，而非同一视频内的正常 DOM 波动。
-     * 9. 异步安全退出：initDanmaku() 内部的任何提前 return，均需同时设置 isDanmakuInitialized=true 和 isDanmakuInitializing=false，
+     * 9. 异步安全退出：initDanmaku() 内部的任何提前 return，通常需同时设置 isDanmakuInitialized=true 和 isDanmakuInitializing=false。
+     *    唯一例外：获取 ItemId 超时时仅解锁 isDanmakuInitializing=false，保留重试机会；真正的"已处理"状态由成功初始化或明确失败（无弹幕）时标记。
      *    确保状态锁在所有退出路径上都被正确解锁。
      */
 
@@ -67,7 +68,8 @@
         baseColor: 'original',
         style: 'default',
         blocklist: '',
-        density: 100
+        density: 100,
+        histogramHeight: 24
     };
     let currentSettings = { ...DEFAULT_SETTINGS };
 
@@ -262,77 +264,23 @@
         });
     }
 
-    // 2. 获取当前视频的 itemId
+    // 2. 获取当前视频的 itemId（Jellyfin 10.11 专用）
+    //    Jellyfin 10.11 的视频 src 格式为：http://host/Videos/{itemId}/stream.mp4
+    //    优先从 video.src 同步提取；已缓存时直接返回缓存值（避免重复探测）
     function getCurrentItemId(videoElement) {
-        // 0) 优先匹配最新 Jellyfin 10.9+ / 10.11+ 和 JMP 的路由结构 (例如 #/video/xxxx)
-        try {
-            const hashMatch = window.location.hash.match(/\/video\/([a-f0-9]{32})/i);
-            if (hashMatch) return hashMatch[1];
-        } catch(e) {}
-
-        // 1) 优先从 location.hash 中解析（例如 #!/videoosd/videoosd.html?id=xxxx）
-        try {
-            const hash = (window.location.hash || '').replace(/^#/, '');
-            const normalized = hash.replace(/^!/, '');
-            const [pathPart, queryPart] = normalized.split('?');
-            const hashParams = new URLSearchParams(queryPart || '');
-            const candidateFromHash = hashParams.get('id') || hashParams.get('itemId') || hashParams.get('mediaSourceId');
-            if (candidateFromHash) return candidateFromHash;
-
-            const pathIdMatch = pathPart && pathPart.match(/([a-f0-9]{32})/i);
-            if (pathIdMatch) return pathIdMatch[1];
-
-            const playMatch = normalized.match(/\/play\/.*?([a-f0-9]{32})/i);
-            if (playMatch) return playMatch[1];
-        } catch (e) {
-            console.warn('[Danmaku Injector] 解析 hash 失败：', e);
+        // 已缓存过 itemId 且尚未切换视频，直接返回缓存值
+        if (currentItemIdCache) {
+            return currentItemIdCache;
         }
 
-        // 2) 再尝试从 location.search 中解析（通用的 URL query）
-        try {
-            const searchParams = new URLSearchParams(window.location.search || '');
-            const candidateFromSearch = searchParams.get('id') || searchParams.get('itemId') || searchParams.get('mediaSourceId');
-            if (candidateFromSearch) return candidateFromSearch;
-        } catch (e) {
-            // 忽略
-        }
-
-        // 3) 最后从 video 元素 src 中提取
+        // 从 video.src 中提取 itemId（/Videos/{itemId}/stream.mp4）
         if (videoElement) {
             const src = videoElement.src || videoElement.currentSrc || '';
-            const srcPathMatch = src.match(/\/(?:Videos|Items)\/([a-f0-9]{32})/i);
-            if (srcPathMatch) return srcPathMatch[1];
-
-            const srcQueryMatch = src.match(/(?:id|itemId|mediaSourceId)=([a-f0-9]{32})/i);
-            if (srcQueryMatch) return srcQueryMatch[1];
-
-            const fallbackUuidMatch = src.match(/([a-f0-9]{32})/i);
-            if (fallbackUuidMatch) return fallbackUuidMatch[1];
-        }
-
-        // 4) 终极 Fallback: 检查最近的网络请求 (Performance API)，精确匹配 PlaybackInfo 或视频流地址
-        // 解决在“电影”等库中，点击海报直接播放时 URL 不包含 ID，且 video src 为 blob 导致无法获取 ID 的 Bug
-        try {
-            const resources = performance.getEntriesByType('resource');
-            for (let i = resources.length - 1; i >= 0; i--) {
-                const url = resources[i].name;
-                const itemMatch = url.match(/\/Items\/([a-f0-9]{32})\/PlaybackInfo/i);
-                if (itemMatch) return itemMatch[1];
-                const videoMatch = url.match(/\/Videos\/([a-f0-9]{32})\//i);
-                if (videoMatch) return videoMatch[1];
+            const match = src.match(/\/Videos\/([a-f0-9]{32})/i);
+            if (match) {
+                console.log(`[Danmaku Injector] [getCurrentItemId] 从 video.src 提取: ${match[1]}`);
+                return match[1];
             }
-        } catch (e) {
-            // 忽略
-        }
-
-        // 5) 终极 Fallback：尝试直接从 Jellyfin 全局播放管理器获取 (最准确，适用任何隐蔽URL形态的客户端)
-        try {
-            if (window.PlaybackManager && typeof window.PlaybackManager.currentItem === 'function') {
-                const item = window.PlaybackManager.currentItem();
-                if (item && item.Id) return item.Id;
-            }
-        } catch (e) {
-            // 忽略
         }
 
         return null;
@@ -455,9 +403,15 @@
                         continue;
                     }
                     const onlineComments = await fetchDanmakuFromOnlineApi(itemId, headers);
-                    if (onlineComments && onlineComments.length > 0) {
-                        showDanmakuSourceToast('获取到在线弹幕');
-                        return onlineComments;
+                    const commentArray = onlineComments.comments || (Array.isArray(onlineComments) ? onlineComments : null);
+                    if (commentArray && commentArray.length > 0) {
+                        const displayText = onlineComments.displayText || null;
+                        if (displayText) {
+                            showDanmakuSourceToast(`获取到在线弹幕 - ${displayText}`);
+                        } else {
+                            showDanmakuSourceToast('获取到在线弹幕');
+                        }
+                        return commentArray;
                     }
                 }
             }
@@ -525,11 +479,54 @@
         }
     }
 
+    // 通过 Jellyfin Sessions API 获取当前正在播放的媒体项 ID
+    // 解决剧集等场景下 URL/hash/video src 均无法获取 ID 的问题
+    // 严格过滤：只返回当前浏览器会话的播放项，避免多设备场景下误取其他设备的播放信息
+    async function fetchCurrentPlayingItemId() {
+        try {
+            await waitForApiClient();
+            const client = window.ApiClient;
+            if (!client) return null;
+
+            const serverUrl = client.serverAddress();
+            const token = client.accessToken();
+            const userId = client.getCurrentUserId();
+            const deviceId = client.deviceId();
+            if (!serverUrl || !token || !userId || !deviceId) return null;
+
+            const response = await fetchWithTimeout(`${serverUrl}/Sessions`, {
+                headers: {
+                    'Authorization': `MediaBrowser Token="${token}"`,
+                    'Content-Type': 'application/json'
+                },
+                timeout: 5000
+            });
+            if (!response.ok) return null;
+
+            const sessions = await response.json();
+            // 严格筛选：必须同时匹配当前用户 ID 和当前设备 ID，确保是本浏览器会话
+            const playingSession = sessions.find(s =>
+                s.NowPlayingItem &&
+                s.NowPlayingItem.Id &&
+                s.UserId === userId &&
+                s.DeviceId === deviceId
+            );
+            if (playingSession && playingSession.NowPlayingItem.Id) {
+                return playingSession.NowPlayingItem.Id;
+            }
+            return null;
+        } catch (e) {
+            console.warn('[Danmaku Injector] fetchCurrentPlayingItemId 失败：', e);
+            return null;
+        }
+    }
+
     async function fetchDanmakuFromOnlineApi(itemId, headers) {
         try {
             // 第一步：获取 Jellyfin 中的视频元数据
             const itemInfo = await fetchItemDetails(itemId, headers);
             let queryFileName = '';
+            let displayText = '';
 
             if (itemInfo) {
                 if (itemInfo.Type === 'Episode') {
@@ -537,11 +534,14 @@
                     const season = String(itemInfo.ParentIndexNumber || 1).padStart(2, '0');
                     const episode = String(itemInfo.IndexNumber || 1).padStart(2, '0');
                     queryFileName = `${seriesName}.S${season}E${episode}`;
+                    displayText = `${seriesName} S${season}E${episode}`;
                     console.log(`[Danmaku Injector] 提取剧集元数据 -> 剧名: "${seriesName}", 季: ${season}, 集: ${episode}`);
                 } else {
                     // 电影或其他类型，使用本地化名称(Name)而不是原名(OriginalTitle)，提高中文弹幕库的匹配率
                     queryFileName = itemInfo.Name || '';
                     if (itemInfo.ProductionYear) queryFileName += `.${itemInfo.ProductionYear}`;
+                    displayText = itemInfo.Name || '';
+                    if (itemInfo.ProductionYear) displayText += ` (${itemInfo.ProductionYear})`;
                     console.log(`[Danmaku Injector] 提取电影/其他元数据 -> 片名: "${itemInfo.Name}", 年份: ${itemInfo.ProductionYear || '无'}`);
                 }
                 console.log(`[Danmaku Injector] 最终拼接的查询参数 (fileName): "${queryFileName}"`);
@@ -573,7 +573,9 @@
 
                         // 第三步：根据 episodeId 请求 XML 弹幕 (请求外部API无需携带Jellyfin headers)
                         const danmakuUrl = `${ONLINE_DANMU_SERVICE_URL}/api/v2/comment/${episodeId}?format=xml&duration=true`;
-                        return await fetchAndParseDanmakuFromUrl(danmakuUrl, {});
+                        const comments = await fetchAndParseDanmakuFromUrl(danmakuUrl, {});
+                        // 返回弹幕数据及用于显示的剧集/电影名称信息
+                        return { comments, displayText };
                     } else {
                         console.log(`[Danmaku Injector] 返回状态为匹配成功，但未包含有效的剧集(matches)信息`);
                         return [];
@@ -738,6 +740,13 @@
                         </select>
                     </div>
                     <div class="dm-setting-row">
+                        <div style="font-size:14px; ${isMobile?'font-weight:500;':''}">直方图高度</div>
+                        <div style="display:flex; align-items:center; gap:6px;">
+                            <input type="range" id="dm-histogram-height" min="0" max="48" step="2" value="24" style="width:100px; margin:0;">
+                            <span id="dm-histogram-height-label" style="font-size:12px; min-width:28px; text-align:right;">24px</span>
+                        </div>
+                    </div>
+                    <div class="dm-setting-row">
                         <div style="font-size:14px; ${isMobile?'font-weight:500;':''}">弹幕密度</div>
                         <select id="dm-density" style="width:140px; margin:0;" class="${selectClass}" ${isSelect}>
                             <option value="100">全部 (100%)</option>
@@ -832,6 +841,9 @@
             document.getElementById('dm-base-color').value = currentSettings.baseColor;
             document.getElementById('dm-color-style').value = currentSettings.style;
             document.getElementById('dm-blocklist').value = currentSettings.blocklist;
+            document.getElementById('dm-histogram-height').value = currentSettings.histogramHeight;
+            document.getElementById('dm-histogram-height-label').textContent =
+                currentSettings.histogramHeight === 0 ? '关闭' : currentSettings.histogramHeight + 'px';
         }
         updateUIValues();
 
@@ -856,6 +868,35 @@
         };
         document.getElementById('dm-area').onchange = (e) => {
             currentSettings.area = e.target.value; saveSettings(); applyVisualSettings();
+        };
+        document.getElementById('dm-histogram-height').oninput = (e) => {
+            const h = parseInt(e.target.value, 10);
+            currentSettings.histogramHeight = h;
+            saveSettings();
+            document.getElementById('dm-histogram-height-label').textContent = h === 0 ? '关闭' : h + 'px';
+            // 即时更新直方图：0=隐藏，>0=显示并刷新位置
+            const canvas = document.getElementById('danmaku-histogram-canvas');
+            if (!canvas) return;
+            if (h === 0) {
+                canvas.style.display = 'none';
+            } else {
+                // 确保 canvas 显示出来
+                canvas.style.display = 'block';
+                canvas.style.height = h + 'px';
+                const sliderContainer = document.querySelector('.sliderContainer.mdl-slider-container');
+                if (sliderContainer) {
+                    const rect = sliderContainer.getBoundingClientRect();
+                    if (rect.width > 0 && rect.height > 0) {
+                        canvas.style.left = rect.left + 'px';
+                        canvas.style.width = rect.width + 'px';
+                        canvas.style.top = (rect.top - h) + 'px';
+                    }
+                }
+                // 重新绘制以适应新高度
+                if (cachedVideoDuration > 0) {
+                    drawHistogramCanvas(canvas, cachedVideoDuration);
+                }
+            }
         };
         document.getElementById('dm-density').onchange = (e) => {
             currentSettings.density = parseInt(e.target.value);
@@ -1084,16 +1125,21 @@
             const syncPosition = () => {
                 if (!document.body.contains(sliderContainer)) return;
                 const rect = sliderContainer.getBoundingClientRect();
-                // 如果进度条处于隐藏状态，直方图同步消失
+                // 如果进度条处于隐藏状态，或直方图高度为0（关闭），直方图同步消失
                 if (rect.width === 0 || rect.height === 0 || window.getComputedStyle(sliderContainer).display === 'none') {
+                    canvas.style.display = 'none';
+                    return;
+                }
+                const h = currentSettings.histogramHeight;
+                if (h === 0) {
                     canvas.style.display = 'none';
                     return;
                 }
                 canvas.style.display = 'block';
                 canvas.style.left = rect.left + 'px';
                 canvas.style.width = rect.width + 'px';
-                canvas.style.top = (rect.top - 24) + 'px'; // 精准置于进度条顶部上方 24px 处
-                canvas.style.height = '24px';
+                canvas.style.top = (rect.top - h) + 'px'; // 精准置于进度条顶部上方 h px 处
+                canvas.style.height = h + 'px';
             };
 
             // 监听容器大小改变 (解决 OSD UI 面板隐藏显示、窗口缩放导致分辨率变糊的情况)
@@ -1102,7 +1148,9 @@
                     const rect = canvas.getBoundingClientRect();
                     if (rect.width > 0 && rect.height > 0) {
                         syncPosition();
-                        drawHistogramCanvas(canvas, duration);
+                        if (currentSettings.histogramHeight > 0) {
+                            drawHistogramCanvas(canvas, duration);
+                        }
                     }
                 });
                 ro.observe(sliderContainer);
@@ -1111,14 +1159,18 @@
                 const resizeHandler = () => {
                     if (document.getElementById('danmaku-histogram-canvas')) {
                         syncPosition();
-                        drawHistogramCanvas(canvas, duration);
+                        if (currentSettings.histogramHeight > 0) {
+                            drawHistogramCanvas(canvas, duration);
+                        }
                     }
                 };
                 window.addEventListener('resize', resizeHandler, { passive: true });
                 canvas._resizeHandler = resizeHandler; // 挂载引用供清理时解绑
-                
+
                 syncPosition();
-                drawHistogramCanvas(canvas, duration);
+                if (currentSettings.histogramHeight > 0) {
+                    drawHistogramCanvas(canvas, duration);
+                }
             }
         }
     }
@@ -1133,11 +1185,27 @@
         // ====== 直方图注入逻辑 (仅限桌面端，且已开启) ======
         if (!isMobile && originalCommentsCache.length > 0 && ENABLE_HISTOGRAM) {
             const sliderContainer = document.querySelector('.sliderContainer.mdl-slider-container');
+            const existingCanvas = document.getElementById('danmaku-histogram-canvas');
             if (sliderContainer) {
                 // 若已成功获取时长，且 Canvas 尚未创建，则渲染
                 if (cachedVideoDuration > 0) {
-                    if (!document.getElementById('danmaku-histogram-canvas')) {
+                    if (!existingCanvas) {
                         renderHistogram(sliderContainer, cachedVideoDuration);
+                    } else {
+                        // Canvas 已存在但可能处于隐藏状态（sliderContainer 之前不可见时被 syncPosition 隐藏）
+                        // 需要主动触发一次 syncPosition 使其重新显示
+                        const rect = sliderContainer.getBoundingClientRect();
+                        const h = currentSettings.histogramHeight;
+                        if (rect.width > 0 && rect.height > 0 && window.getComputedStyle(sliderContainer).display !== 'none' && h > 0) {
+                            existingCanvas.style.display = 'block';
+                            existingCanvas.style.left = rect.left + 'px';
+                            existingCanvas.style.width = rect.width + 'px';
+                            existingCanvas.style.top = (rect.top - h) + 'px';
+                            existingCanvas.style.height = h + 'px';
+                            drawHistogramCanvas(existingCanvas, cachedVideoDuration);
+                        } else if (h === 0) {
+                            existingCanvas.style.display = 'none';
+                        }
                     }
                 }
                 // 尚未获取时长，尝试轮询查询
@@ -1288,37 +1356,30 @@
 
         let videoElement = initialVideoElement;
         let itemId = null;
-        let retryCount = 0;
-        const maxRetries = 20; // 延长等待到 10 秒，兼容客户端 (如JMP) 视频引擎延迟挂载
 
-        while (retryCount < maxRetries) {
-            // JMP 客户端中，底层播放器组件可能晚于路由变化生成，持续尝试获取
-            if (!videoElement) {
-                videoElement = document.querySelector('video:not([data-injected-video="1"])');
-            }
+        // ---- 阶段一：同步从 video.src 提取（Jellyfin 10.11 直接 MP4 流，立即可用）----
+        if (!videoElement) {
+            videoElement = document.querySelector('video:not([data-injected-video="1"])');
+        }
+        itemId = getCurrentItemId(videoElement);
 
-            itemId = getCurrentItemId(videoElement);
-            if (itemId) break;
-
-            if (retryCount === 0) {
-                console.debug('[Danmaku Injector] 当前暂未获取到视频 ItemId，开始轮询等待 URL 或网络请求更新...');
-            }
-
-            await new Promise(resolve => setTimeout(resolve, 500));
-            retryCount++;
-
-            // 彻底对齐 jellysleep 思想：不再区分桌面端或客户端，统一通过判断是否离开了播放页面路由来安全终止
-            const isVideoPage = window.location.hash.includes('/video') || window.location.hash.includes('videoosd') || window.location.href.includes('/play') || document.querySelector('.videoOsdPage') !== null;
-            if (!isVideoPage) {
-                isDanmakuInitialized = true; // 语义9：退出时同时标记为已处理，防止 Observer 继续尝试
-                isDanmakuInitializing = false;
-                return;
+        // ---- 阶段二：Sessions API 兜底（最可靠，解决 blob URL 等同步方法失效的场景）----
+        if (!itemId) {
+            try {
+                const sessionItemId = await fetchCurrentPlayingItemId();
+                if (sessionItemId) {
+                    console.log(`[Danmaku Injector] Sessions API 获取到 ItemId: ${sessionItemId}`);
+                    itemId = sessionItemId;
+                }
+            } catch (e) {
+                console.warn('[Danmaku Injector] Sessions API 获取失败：', e);
             }
         }
 
+        // ---- 阶段三：仍未获取到 ID，放弃本次初始化 ----
         if (!itemId) {
-            console.warn('[Danmaku Injector] 获取视频 ItemId 超时，放弃本次弹幕初始化。');
-            isDanmakuInitialized = true; // 关键修复：标记为已处理(失败)，防止无关的 DOM 变化不断触发新一轮的轮询死循环
+            console.warn('[Danmaku Injector] 获取视频 ItemId 失败，放弃本次弹幕初始化。');
+            // 不标记 isDanmakuInitialized=true，保留重试机会；Observer 在 DOM 变化时会再次触发
             isDanmakuInitializing = false;
             return;
         }

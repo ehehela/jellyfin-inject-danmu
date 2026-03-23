@@ -17,6 +17,7 @@
 > **注意：**
 > - `inject-danmu.js` 在 **JMP 桌面客户端**下会自动禁用（QtWebEngine 环境弹幕渲染存在已知兼容性问题，脚本加载时检测后直接退出）。JMP 用户仍可通过 Badge 获知本地弹幕刮削状态。
 > - `inject-danmu-badge.js` 在 JMP 和网页端均可正常工作，两者职责互不重叠。
+> - 本脚本经 **Jellyfin v10.11.6** 验证。
 
 ---
 
