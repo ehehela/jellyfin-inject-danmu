@@ -20,6 +20,9 @@
      * 10. 直方图仅限桌面端：直方图（弹幕密度可视化）仅在桌面端渲染和提供调节选项。
      *    移动端不显示直方图，画布不创建，设置面板中也不提供"直方图高度"调节项。
      *    判断依据：window.innerWidth <= 768 或 userAgent 匹配 Mobi|Android|iPhone|iPad。
+     * 11. 时间偏移每视频独立：时间偏移（timeOffset）用于将弹幕时间线相对视频水平平移，以对齐弹幕与视频内容。
+     *    该值为会话级状态，切换视频或刷新页面后自动重置为 0，不跨视频保留。
+     *    效果同时体现在弹幕直方图上（直方图随时间偏移左右平移）。
      */
 
     // 配置项
@@ -72,18 +75,23 @@
         style: 'default',
         blocklist: '',
         density: 100,
-        histogramHeight: 24
+        histogramHeight: 24,
+        timeOffset: 0
     };
     let currentSettings = { ...DEFAULT_SETTINGS };
+    let timeOffset = 0; // 弹幕时间偏移量（秒），负数=提前，正数=延后
 
     function loadSettings() {
         try {
             const saved = localStorage.getItem('jellyfin_danmaku_settings');
             if (saved) currentSettings = { ...DEFAULT_SETTINGS, ...JSON.parse(saved) };
+            // timeOffset 不从 localStorage 恢复，每个视频默认从 0 开始
+            timeOffset = 0;
         } catch (e) { }
     }
 
     function saveSettings() {
+        currentSettings.timeOffset = timeOffset;
         localStorage.setItem('jellyfin_danmaku_settings', JSON.stringify(currentSettings));
     }
 
@@ -229,7 +237,8 @@
             });
         }
 
-        // 3. 映射颜色
+        // 3. 映射颜色 & 应用时间偏移
+        const offset = timeOffset; // 负数=提前，正数=延后
         return filtered.map(c => {
             let outColor = c.originalColor;
             if (currentSettings.baseColor === 'random') {
@@ -242,7 +251,8 @@
                 outColor = colorMap[currentSettings.baseColor] || c.originalColor;
             }
             // 修复：Danmaku.js 引擎必须通过 style 属性包裹对象才能生效颜色
-            return { ...c, style: { ...c.style, color: outColor } };
+            // 应用时间偏移：弹幕显示时间 = 原始时间 + offset
+            return { ...c, time: c.time + offset, style: { ...c.style, color: outColor } };
         });
     }
 
@@ -657,6 +667,7 @@
         isDanmakuInitialized = false;
         currentItemIdCache = null;
         originalCommentsCache = [];
+        timeOffset = 0; // 切换视频时重置时间偏移
 
         // 清理直方图状态
         cachedVideoDuration = 0;
@@ -790,6 +801,15 @@
                             <option value="250">极快</option>
                         </select>
                     </div>
+                    <div class="dm-setting-row">
+                        <div style="font-size:14px; ${isMobile?'font-weight:500;':''}">时间偏移</div>
+                        <div style="display:flex; align-items:center; gap:6px;">
+                            <button id="dm-timeoffset-dec" class="${btnClass}" ${isBtn} style="padding: 0.3em 0.6em; min-width:28px;">−</button>
+                            <input type="text" id="dm-timeoffset" class="${inputClass}" ${isInput} style="width:60px; text-align:center; margin:0; padding: 4px 2px;" value="+0">
+                            <span style="font-size:12px; color: var(--theme-secondary-text-color, #aaa);">秒</span>
+                            <button id="dm-timeoffset-inc" class="${btnClass}" ${isBtn} style="padding: 0.3em 0.6em; min-width:28px;">+</button>
+                        </div>
+                    </div>
                     <div class="dm-setting-row" style="flex-direction:column; align-items:flex-start; gap:8px; border-bottom:none;">
                         <div style="display:flex; justify-content:space-between; width:100%; align-items:center;">
                             <div style="font-size:14px; ${isMobile?'font-weight:500;':''}">屏蔽关键词 (每行一个)</div>
@@ -845,6 +865,7 @@
             document.getElementById('dm-base-color').value = currentSettings.baseColor;
             document.getElementById('dm-color-style').value = currentSettings.style;
             document.getElementById('dm-blocklist').value = currentSettings.blocklist;
+            document.getElementById('dm-timeoffset').value = timeOffset >= 0 ? '+' + timeOffset : timeOffset;
             if (!isMobile) {
                 document.getElementById('dm-histogram-height').value = currentSettings.histogramHeight;
                 document.getElementById('dm-histogram-height-label').textContent =
@@ -856,10 +877,16 @@
         // 一键重置
         document.getElementById('danmaku-settings-reset').onclick = () => {
             currentSettings = { ...DEFAULT_SETTINGS };
+            timeOffset = DEFAULT_SETTINGS.timeOffset || 0;
             saveSettings();
             updateUIValues();
             applyVisualSettings();
             reloadDanmakuData();
+            // 重绘直方图
+            const canvas = document.getElementById('danmaku-histogram-canvas');
+            if (canvas && cachedVideoDuration > 0) {
+                drawHistogramCanvas(canvas, cachedVideoDuration);
+            }
         };
 
         // 绑定用户输入事件
@@ -913,6 +940,42 @@
         };
         document.getElementById('dm-speed').onchange = (e) => {
             currentSettings.speed = parseInt(e.target.value); saveSettings(); applyVisualSettings();
+        };
+
+        // 时间偏移控制
+        const timeOffsetInput = document.getElementById('dm-timeoffset');
+        const updateTimeOffset = (newOffset) => {
+            timeOffset = newOffset;
+            timeOffsetInput.value = timeOffset >= 0 ? '+' + timeOffset : timeOffset;
+            saveSettings();
+            reloadDanmakuData();
+            // 即时重绘直方图
+            const canvas = document.getElementById('danmaku-histogram-canvas');
+            if (canvas && cachedVideoDuration > 0) {
+                drawHistogramCanvas(canvas, cachedVideoDuration);
+            }
+        };
+        document.getElementById('dm-timeoffset-dec').onclick = () => {
+            updateTimeOffset(parseFloat((timeOffset - 0.5).toFixed(1)));
+        };
+        document.getElementById('dm-timeoffset-inc').onclick = () => {
+            updateTimeOffset(parseFloat((timeOffset + 0.5).toFixed(1)));
+        };
+        timeOffsetInput.onchange = () => {
+            const val = parseFloat(timeOffsetInput.value);
+            if (!isNaN(val)) {
+                updateTimeOffset(parseFloat(val.toFixed(1)));
+            } else {
+                timeOffsetInput.value = timeOffset >= 0 ? '+' + timeOffset : timeOffset;
+            }
+        };
+        // 阻止数字键等按键冒泡到视频播放器，确保输入框能正常接收
+        timeOffsetInput.onkeydown = (e) => {
+            // 数字键、负号、正号、句点、退格、删除、左右方向键、小数点
+            if ((e.key >= '0' && e.key <= '9') || e.key === '-' || e.key === '+' || e.key === '.' ||
+                e.key === 'Backspace' || e.key === 'Delete' || e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+                e.stopPropagation();
+            }
         };
         document.getElementById('dm-base-color').onchange = (e) => {
             currentSettings.baseColor = e.target.value;
@@ -1049,7 +1112,7 @@
     function drawHistogramCanvas(canvas, duration) {
         if (!originalCommentsCache || originalCommentsCache.length === 0) return;
 
-        // 动态读取当前 Jellyfin 进度条“已播放”部分的准确主题颜色
+        // 动态读取当前 Jellyfin 进度条”已播放”部分的准确主题颜色
         const progressFill = document.querySelector('.mdl-slider-background-lower');
         const themeColor = progressFill ? window.getComputedStyle(progressFill).backgroundColor : '#00a4dc';
 
@@ -1058,8 +1121,12 @@
         const buckets = new Array(bucketsCount).fill(0);
         let maxDensity = 0;
 
+        // 应用时间偏移计算桶分布
         originalCommentsCache.forEach(c => {
-            const bucketIndex = Math.floor((c.time / duration) * bucketsCount);
+            const shiftedTime = c.time + timeOffset;
+            // 弹幕时间偏移后可能出现负数或超出视频时长，只统计在 [0, duration] 范围内的
+            if (shiftedTime < 0 || shiftedTime > duration) return;
+            const bucketIndex = Math.floor((shiftedTime / duration) * bucketsCount);
             if (bucketIndex >= 0 && bucketIndex < bucketsCount) {
                 buckets[bucketIndex]++;
                 if (buckets[bucketIndex] > maxDensity) {
