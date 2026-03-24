@@ -2,7 +2,7 @@
 
 这是一套用于 Jellyfin 的前端 JavaScript 注入脚本，旨在为 Jellyfin Web 客户端提供原生的、沉浸式的弹幕（Danmaku）播放体验。本脚本需要配合 Jellyfin 的 JavaScript Injector 插件使用。
 
-![弹幕效果图](Screenshot%202026-03-22%20061942.png)
+![弹幕效果图](screenshots/Screenshot%202026-03-22%20061942.png)
 
 ## 功能特性
 

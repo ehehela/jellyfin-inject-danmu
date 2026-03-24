@@ -17,6 +17,9 @@
      * 9. 异步安全退出：initDanmaku() 内部的任何提前 return，通常需同时设置 isDanmakuInitialized=true 和 isDanmakuInitializing=false。
      *    唯一例外：获取 ItemId 超时时仅解锁 isDanmakuInitializing=false，保留重试机会；真正的"已处理"状态由成功初始化或明确失败（无弹幕）时标记。
      *    确保状态锁在所有退出路径上都被正确解锁。
+     * 10. 直方图仅限桌面端：直方图（弹幕密度可视化）仅在桌面端渲染和提供调节选项。
+     *    移动端不显示直方图，画布不创建，设置面板中也不提供"直方图高度"调节项。
+     *    判断依据：window.innerWidth <= 768 或 userAgent 匹配 Mobi|Android|iPhone|iPad。
      */
 
     // 配置项
@@ -739,13 +742,14 @@
                             <option value="25">顶部 (25%)</option>
                         </select>
                     </div>
+                    ${!isMobile ? `
                     <div class="dm-setting-row">
                         <div style="font-size:14px; ${isMobile?'font-weight:500;':''}">直方图高度</div>
                         <div style="display:flex; align-items:center; gap:6px;">
                             <input type="range" id="dm-histogram-height" min="0" max="48" step="2" value="24" style="width:100px; margin:0;">
                             <span id="dm-histogram-height-label" style="font-size:12px; min-width:28px; text-align:right;">24px</span>
                         </div>
-                    </div>
+                    </div>` : ''}
                     <div class="dm-setting-row">
                         <div style="font-size:14px; ${isMobile?'font-weight:500;':''}">弹幕密度</div>
                         <select id="dm-density" style="width:140px; margin:0;" class="${selectClass}" ${isSelect}>
@@ -841,9 +845,11 @@
             document.getElementById('dm-base-color').value = currentSettings.baseColor;
             document.getElementById('dm-color-style').value = currentSettings.style;
             document.getElementById('dm-blocklist').value = currentSettings.blocklist;
-            document.getElementById('dm-histogram-height').value = currentSettings.histogramHeight;
-            document.getElementById('dm-histogram-height-label').textContent =
-                currentSettings.histogramHeight === 0 ? '关闭' : currentSettings.histogramHeight + 'px';
+            if (!isMobile) {
+                document.getElementById('dm-histogram-height').value = currentSettings.histogramHeight;
+                document.getElementById('dm-histogram-height-label').textContent =
+                    currentSettings.histogramHeight === 0 ? '关闭' : currentSettings.histogramHeight + 'px';
+            }
         }
         updateUIValues();
 
@@ -869,35 +875,37 @@
         document.getElementById('dm-area').onchange = (e) => {
             currentSettings.area = e.target.value; saveSettings(); applyVisualSettings();
         };
-        document.getElementById('dm-histogram-height').oninput = (e) => {
-            const h = parseInt(e.target.value, 10);
-            currentSettings.histogramHeight = h;
-            saveSettings();
-            document.getElementById('dm-histogram-height-label').textContent = h === 0 ? '关闭' : h + 'px';
-            // 即时更新直方图：0=隐藏，>0=显示并刷新位置
-            const canvas = document.getElementById('danmaku-histogram-canvas');
-            if (!canvas) return;
-            if (h === 0) {
-                canvas.style.display = 'none';
-            } else {
-                // 确保 canvas 显示出来
-                canvas.style.display = 'block';
-                canvas.style.height = h + 'px';
-                const sliderContainer = document.querySelector('.sliderContainer.mdl-slider-container');
-                if (sliderContainer) {
-                    const rect = sliderContainer.getBoundingClientRect();
-                    if (rect.width > 0 && rect.height > 0) {
-                        canvas.style.left = rect.left + 'px';
-                        canvas.style.width = rect.width + 'px';
-                        canvas.style.top = (rect.top - h) + 'px';
+        if (!isMobile) {
+            document.getElementById('dm-histogram-height').oninput = (e) => {
+                const h = parseInt(e.target.value, 10);
+                currentSettings.histogramHeight = h;
+                saveSettings();
+                document.getElementById('dm-histogram-height-label').textContent = h === 0 ? '关闭' : h + 'px';
+                // 即时更新直方图：0=隐藏，>0=显示并刷新位置
+                const canvas = document.getElementById('danmaku-histogram-canvas');
+                if (!canvas) return;
+                if (h === 0) {
+                    canvas.style.display = 'none';
+                } else {
+                    // 确保 canvas 显示出来
+                    canvas.style.display = 'block';
+                    canvas.style.height = h + 'px';
+                    const sliderContainer = document.querySelector('.sliderContainer.mdl-slider-container');
+                    if (sliderContainer) {
+                        const rect = sliderContainer.getBoundingClientRect();
+                        if (rect.width > 0 && rect.height > 0) {
+                            canvas.style.left = rect.left + 'px';
+                            canvas.style.width = rect.width + 'px';
+                            canvas.style.top = (rect.top - h) + 'px';
+                        }
+                    }
+                    // 重新绘制以适应新高度
+                    if (cachedVideoDuration > 0) {
+                        drawHistogramCanvas(canvas, cachedVideoDuration);
                     }
                 }
-                // 重新绘制以适应新高度
-                if (cachedVideoDuration > 0) {
-                    drawHistogramCanvas(canvas, cachedVideoDuration);
-                }
-            }
-        };
+            };
+        }
         document.getElementById('dm-density').onchange = (e) => {
             currentSettings.density = parseInt(e.target.value);
             saveSettings();
