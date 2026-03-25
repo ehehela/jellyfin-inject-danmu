@@ -279,24 +279,31 @@
 
     // 2. 获取当前视频的 itemId（Jellyfin 10.11 专用）
     //    Jellyfin 10.11 的视频 src 格式为：http://host/Videos/{itemId}/stream.mp4
-    //    优先从 video.src 同步提取；已缓存时直接返回缓存值（避免重复探测）
+    //    优先从 video.src 同步提取；已缓存时需验证是否与当前视频匹配，避免切集后返回旧缓存
     function getCurrentItemId(videoElement) {
-        // 已缓存过 itemId 且尚未切换视频，直接返回缓存值
-        if (currentItemIdCache) {
-            return currentItemIdCache;
-        }
-
         // 从 video.src 中提取 itemId（/Videos/{itemId}/stream.mp4）
+        let extractedId = null;
         if (videoElement) {
             const src = videoElement.src || videoElement.currentSrc || '';
             const match = src.match(/\/Videos\/([a-f0-9]{32})/i);
             if (match) {
-                console.log(`[Danmaku Injector] [getCurrentItemId] 从 video.src 提取: ${match[1]}`);
-                return match[1];
+                extractedId = match[1];
             }
         }
 
-        return null;
+        // 已缓存过 itemId：只有当缓存值与当前视频提取的 ID 一致时才使用缓存
+        // 修复 Bug：切集后（如 intro skipper 自动跳到下一集）视频 src 已变，
+        // 但 currentItemIdCache 尚未被 cleanup 清除，此时必须以新提取的 ID 为准
+        if (currentItemIdCache && extractedId && currentItemIdCache === extractedId) {
+            return currentItemIdCache;
+        }
+
+        // 仅在 ID 真正变化（获取到有效新 ID）时记录日志，避免播放期间的频繁日志刷屏
+        if (extractedId) {
+            console.log(`[Danmaku Injector] [getCurrentItemId] 从 video.src 提取: ${extractedId}`);
+        }
+
+        return extractedId;
     }
 
     function showDanmakuSourceToast(text) {
@@ -1571,7 +1578,19 @@
         return;
     }
 
+    // 防抖：防止播放期间 DOM 频繁变化时 MutationObserver 回调被高频触发
+    // Jellyfin 播放页在播放时会有大量 DOM 更新（进度条、时间戳等），不加限制会导致 getCurrentItemId 每次都被调用
+    let observerDebounceTimer = null;
+    const OBSERVER_DEBOUNCE_MS = 200;
+
     const observer = new MutationObserver(() => {
+        // 已处于防抖窗口内，直接跳过
+        if (observerDebounceTimer !== null) return;
+
+        observerDebounceTimer = setTimeout(() => {
+            observerDebounceTimer = null;
+        }, OBSERVER_DEBOUNCE_MS);
+
         // 排除 trailer 注入器可能生成的干扰视频标签
         const videoElement = document.querySelector('video:not([data-injected-video="1"])');
         const isVideoPage = window.location.hash.includes('/video') || window.location.hash.includes('videoosd') || window.location.href.includes('/play') || document.querySelector('.videoOsdPage') !== null;
@@ -1593,7 +1612,7 @@
             // 彻底对齐 jellysleep 触发条件：不区分网页与客户端，也不再依赖脆弱的 video.src 时序。
             // 只要路由在播放页且原生控制栏已挂载，即代表前端组件已完全就绪，此时注入绝对安全！
             const controlsContainer = document.querySelector('.videoOsdBottom .buttons.focuscontainer-x') || document.querySelector('.osdControls .buttons');
-            
+
             if (isVideoPage && controlsContainer) {
                 initDanmaku(videoElement);
             }
