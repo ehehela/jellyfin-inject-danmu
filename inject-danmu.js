@@ -378,6 +378,42 @@
         }
     }
 
+    // 带有重试和指数退避的 fetch（仅对超时和可重试 HTTP 状态码重试）
+    async function fetchWithRetry(resource, options = {}) {
+        const {
+            retries = 2,
+            retryDelay = 1000,
+            timeout = 8000,
+            retryableStatusCodes = [502, 503, 504, 429],
+            ...restOptions
+        } = options;
+        let lastError;
+        for (let attempt = 0; attempt <= retries; attempt++) {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), timeout);
+            try {
+                const response = await fetch(resource, { ...restOptions, signal: controller.signal });
+                clearTimeout(timeoutId);
+                if (response.ok) return response;
+                if (!retryableStatusCodes.includes(response.status) || attempt === retries) {
+                    return response;
+                }
+                lastError = new Error(`HTTP ${response.status}`);
+            } catch (error) {
+                clearTimeout(timeoutId);
+                lastError = error;
+                if (error.name !== 'AbortError') break;
+            }
+            if (attempt < retries) {
+                const jitter = Math.random() * 300;
+                const delay = (retryDelay * Math.pow(2, attempt)) + jitter;
+                console.log(`[Danmaku Injector] 请求失败，${delay.toFixed(0)}ms 后重试 (${attempt + 1}/${retries})`);
+                await new Promise(r => setTimeout(r, delay));
+            }
+        }
+        throw lastError;
+    }
+
     // ==========================================
     // 借鉴 Jellysleep 高级设计 2：强等待 ApiClient 就绪
     // ==========================================
@@ -461,9 +497,13 @@
         }
     }
 
-    async function fetchAndParseDanmakuFromUrl(url, headers) {
+    async function fetchAndParseDanmakuFromUrl(url, headers, { retry = false } = {}) {
+        const fetchFn = retry ? fetchWithRetry : fetchWithTimeout;
+        const fetchOptions = retry
+            ? { headers, timeout: 10000, retries: 2 }
+            : { headers, timeout: 10000 };
         try {
-            const response = await fetchWithTimeout(url, { headers, timeout: 10000 });
+            const response = await fetchFn(url, fetchOptions);
             if (!response.ok) {
                 if (response.status === 404) return [];
                 throw new Error(`弹幕文件获取失败 (HTTP ${response.status})`);
@@ -571,11 +611,12 @@
             if (queryFileName) {
                 console.log(`[Danmaku Injector] 正在使用关键字匹配弹幕: ${queryFileName}`);
                 const matchUrl = `${ONLINE_DANMU_SERVICE_URL}/api/v2/match`;
-                const matchResponse = await fetchWithTimeout(matchUrl, {
+                const matchResponse = await fetchWithRetry(matchUrl, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ fileName: queryFileName }),
-                    timeout: 8000
+                    timeout: 8000,
+                    retries: 2
                 });
 
                 if (matchResponse.ok) {
@@ -593,7 +634,7 @@
 
                         // 第三步：根据 episodeId 请求 XML 弹幕 (请求外部API无需携带Jellyfin headers)
                         const danmakuUrl = `${ONLINE_DANMU_SERVICE_URL}/api/v2/comment/${episodeId}?format=xml&duration=true`;
-                        const comments = await fetchAndParseDanmakuFromUrl(danmakuUrl, {});
+                        const comments = await fetchAndParseDanmakuFromUrl(danmakuUrl, {}, { retry: true });
                         // 返回弹幕数据及用于显示的剧集/电影名称信息
                         return { comments, displayText };
                     } else {
