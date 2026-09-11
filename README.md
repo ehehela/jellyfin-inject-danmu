@@ -1,55 +1,55 @@
-# Jellyfin Inject Danmu (Jellyfin 弹幕注入脚本)
+# Jellyfin Inject Danmu
 
-这是一套用于 Jellyfin 的前端 JavaScript 注入脚本，旨在为 Jellyfin Web 客户端提供原生的、沉浸式的弹幕（Danmaku）播放体验。本脚本需要配合 Jellyfin 的 JavaScript Injector 插件使用。
+用于 Jellyfin Web 客户端的 JavaScript 注入弹幕脚本，包含播放器弹幕层和详情页本地弹幕徽章。需要 [Jellyfin JavaScript Injector](https://github.com/n00bcodr/Jellyfin-JavaScript-Injector) 或等效的前端注入方式。
 
-![弹幕效果图](screenshots/Screenshot%202026-03-22%20061942.png)
+本版本以 Jellyfin Server **10.11.11**、Danmu 插件 **2.7.4.0** 验证和设计。`jellysleep.js` 是无关的外部脚本，不属于本项目，也不需要注入。
 
-## 功能特性
+## 脚本
 
-本项目主要包含两个核心注入脚本：
+- `inject-danmu.js`：在实际的 HTML5 `<video>` 区域上渲染本地或在线 XML 弹幕，提供开关、样式、密度、屏蔽词、时间偏移与桌面端直方图。
+- `inject-danmu-badge.js`：在详情页显示“本地弹幕”徽章。它不查询在线服务，因此徽章状态不代表在线服务是否可匹配。
 
-### 1. 播放器弹幕增强 (`inject-danmu.js`)
-在 Jellyfin 自带的 HTML5 播放器中无缝嵌入弹幕层。主要功能包括：支持本地与在线多源智能查询；提供自适应桌面端与移动端的原生级控制面板；支持弹幕样式、色彩特效、密度限制与屏蔽词等高自由度设置；支持在桌面端绘制进度条高能直方图；内置严格的状态锁机制，有效防止 SPA 路由切换引发的内存泄露和卡顿。
+`inject-danmu.js` 会在 JMP/QtWebEngine 中自行退出；Badge 可独立使用。
 
-### 2. 详情页弹幕徽章 (`inject-danmu-badge.js`)
-在进入视频播放前，提前告知用户当前视频的服务端是否已刮削到本地弹幕。主要功能包括：后台无感异步探测本地弹幕资源状态；在视频详情页信息栏动态挂载”弹幕”徽章；内置防抖与缓存淘汰机制，严防高频 DOM 重绘卡顿与内存泄露。
+## 安装
 
-> **注意：**
-> - `inject-danmu.js` 在 **JMP 桌面客户端**下会自动禁用（QtWebEngine 环境弹幕渲染存在已知兼容性问题，脚本加载时检测后直接退出）。JMP 用户仍可通过 Badge 获知本地弹幕刮削状态。
-> - `inject-danmu-badge.js` 在 JMP 和网页端均可正常工作，两者职责互不重叠。
-> - 本脚本经 **Jellyfin v10.11.6** 验证。
+1. 安装并启用 JavaScript Injector。
+   - **安全提醒**：若注入脚本会读取 Jellyfin 登录态或包含任何私有配置，请在 Injector 中启用 **Requires Authentication**，避免未登录访问者取得注入脚本。已登录用户仍可在浏览器中查看脚本内容，因此不要把密码、API Key、Worker Secret 或其他凭据写入 JavaScript。
+2. 如需本地弹幕，安装 [jellyfin-plugin-danmu](https://github.com/cxfksword/jellyfin-plugin-danmu)。
+3. 如需在线弹幕，部署与 [huangxd-/danmu_api](https://github.com/huangxd-/danmu_api) 兼容的 `danmu_api` 服务。
+4. 分别注入 `inject-danmu-badge.js` 与 `inject-danmu.js`，刷新 Jellyfin 网页。
 
----
+## 在线弹幕配置
 
-## 安装与使用
+编辑 `inject-danmu.js` 顶部的常量。默认留空，因此不会向任何外部服务发请求。
 
-为了正常使用本脚本，您需要准备对应的环境并按步骤配置：
+```js
+// 必须是 HTTPS 的完整 API 基址；可以包含 Cloudflare Worker 的路径前缀。
+const ONLINE_DANMU_SERVICE_URL = 'https://danmu.example.com/worker-prefix';
 
-1. **安装基础注入插件**：确保 Jellyfin 已启用 [Jellyfin-JavaScript-Injector](https://github.com/n00bcodr/Jellyfin-JavaScript-Injector)（或其他支持注入自定义 JS 的方式）。
-   > **安全提醒**：若脚本中包含 Token 等敏感信息，请在插件设置中勾选 **Requires Authentication**，防止未授权访问时敏感信息泄露。
-2. **配置服务端弹幕支持**（按需）：
-   - **本地弹幕**：服务端需安装 [jellyfin-plugin-danmu](https://github.com/cxfksword/jellyfin-plugin-danmu) 插件。
-   - **在线匹配**：需自行部署 [danmu_api](https://github.com/huangxd-/danmu_api) 服务。
-3. **注入脚本**：将本项目中的 `inject-danmu-badge.js` 和 `inject-danmu.js` 代码分别添加到注入列表中。
-4. 刷新 Jellyfin Web 页面即可生效。
-
-## 配置说明
-
-您可以直接在 `inject-danmu.js` 文件的顶部按需修改以下常量来定制您的弹幕来源策略：
-
-```javascript
-// 在线弹幕匹配 API 的服务地址（需自行部署或填写可用的后端服务）
-const ONLINE_DANMU_SERVICE_URL = 'https://yourapiurl.com/123456789';
-
-// 查询顺序配置：支持 'local' (本地探测) 和 'online' (在线API匹配)
-// 默认优先尝试本地，如果本地没有则尝试在线刮削：
-const DANMAKU_QUERY_ORDER = ['local', 'online']; 
-
-// 弹幕状态通知 (Toast) 的样式偏好
-const TOAST_FONT_SIZE = '32px'; 
-const TOAST_POSITION_VERTICAL = 'center'; 
+// 'local' 使用 Jellyfin Danmu 插件；'online' 使用 danmu_api。
+const DANMAKU_QUERY_ORDER = ['local', 'online'];
 ```
+
+脚本通过 `ApiClient.serverAddress()` 构造 Jellyfin API 地址，兼容未来启用 Base URL 的情况；不要在脚本中硬编码 LAN IP、端口或公网域名。
+
+LAN HTTP 和经 Cloudflare 反代的公网 HTTPS 均无需在前端配置 Origin。在线服务必须由其 Cloudflare Worker/API 提供允许 Jellyfin 页面 Origin 的 CORS 响应；这项跨域策略不能由本脚本绕过。
+
+`ONLINE_DANMU_SERVICE_URL` 的域名和路径前缀会随脚本下发给浏览器，因而**不是秘密**。公开端点本身通常不会泄露 Jellyfin Token：本脚本不会将 Jellyfin 认证头发送给在线服务；但端点可能遭受探测或滥用。请在 Worker 侧配置限流、日志脱敏和必要的访问控制，不要将路径随机串当作认证机制。
+
+## 本地与在线请求行为
+
+- 本地播放始终请求当前 Jellyfin Origin/Base URL 的 `api/danmu/{itemId}/raw` 并解析 XML。不会跟随 `api/danmu/{itemId}` 所给的绝对 `url`，因为它可能是内网 HTTP 地址；这样可避免公网 HTTPS 的混合内容和向外部地址发送 Jellyfin Token。
+- Badge 只以 `api/danmu/{itemId}` 的链接是否明确存在作为本地弹幕提示，成功结果缓存 5 分钟、明确无弹幕缓存 1 分钟；网络失败不缓存。
+- 在线流程是 `POST /api/v2/match` 后请求 `GET /api/v2/comment/{episodeId}?format=xml&duration=true`。在线请求不携带 Jellyfin 身份认证头。
+- 渲染器固定使用 `danmaku@2.0.10`，仅在确认获取到弹幕后加载。
+
+## 使用说明
+
+弹幕层和直方图均固定挂在 `body`，通过实际 `<video>` 的位置和尺寸同步显示，不修改 Jellyfin 播放器的虚拟 DOM。切集、自动连播、离开播放页与视频元素替换会取消仍在进行的请求并清理 UI、观察器和渲染实例。
+
+时间偏移按视频生命周期重置；直方图仅在桌面端显示。设置中需要重算评论的项目会重建 Danmaku 引擎，而不是修改其私有字段。
 
 ## 免责声明
 
-本脚本仅用于前端 UI 增强，所有在线刮削接口及数据来源需由用户自行配置并承担相关风险。
+本项目只提供前端显示逻辑。在线服务、数据来源、CORS 与 Cloudflare 配置由部署者负责。
